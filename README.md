@@ -63,7 +63,7 @@ dotnet test                             # 單元測試
 | GET | `/api/providers` | 師傅列表 | 200 | |
 | GET | `/api/services` | 服務列表 | 200 | |
 | GET | `/api/providers/{id}/available-slots?date=2026-11-20` | 某師傅某天的可預約時段 | 200 | 400、404 |
-| POST | `/api/bookings` | 建立預約 | 201 + `Location` | 400、404、409 |
+| POST | `/api/bookings` | 建立預約（可帶 `Idempotency-Key` 標頭） | 201 + `Location` | 400、404、409、422 |
 | GET | `/api/bookings/{id}` | 查單筆預約 | 200 | 404 |
 | POST | `/api/bookings/{id}/cancel` | 取消預約 | 200 | 404、409 |
 | GET | `/api/customers/{id}/bookings?page=1&pageSize=20` | 客戶預約紀錄（分頁） | 200 | 400、404 |
@@ -194,7 +194,39 @@ ORDER BY Revenue DESC, p.Id;
 
 **已知限制**：營收以目前的 `Services.Price` 計算；若服務調價，過去月份的營收也會跟著改變。正式系統應在預約時把價格寫入預約資料。
 
-### 6. 其他
+### 6. 建立預約的冪等性（Idempotency-Key）
+
+網路逾時後，用戶端不知道第一次請求是否成功，只能重送。帶上 `Idempotency-Key` 標頭，重送就不會重複建立預約：
+
+```http
+POST /api/bookings
+Idempotency-Key: 7eb1cd17-dc1d-4c9b-b5d4-e264e9a60a4d
+```
+
+| 情況 | 回應 |
+|---|---|
+| 新的 Key | 正常處理，記錄結果 |
+| 同一個 Key、相同內容，第一次已完成 | **201，回傳第一次的結果**（同一筆預約），加上 `Idempotent-Replayed: true` 標頭 |
+| 同一個 Key、相同內容，第一次還在處理 | 409，請稍後重試 |
+| 同一個 Key、**不同內容** | 422 |
+| 第一次處理失敗（例如時段已被預約） | 釋放 Key，重送會再處理一次（失敗沒有留下任何資料，重新處理是安全的） |
+| 沒帶 Key | 與原本行為相同 |
+
+**怎麼保證同一個 Key 同時送來多次也只建立一筆**
+
+1. 先把 Key 寫進 `IdempotencyRecords`（Key 是主鍵）：同時到達的請求只有一個能寫入，其餘收到主鍵衝突（2627）
+2. 搶到的請求建立預約，再把回應內容存回這一筆紀錄
+3. 沒搶到的請求讀取紀錄：內容雜湊不同 → 422；尚未完成 → 409；已完成 → 回放
+
+與 Day 3 的唯一索引是同一個思路：**由資料庫的唯一約束決定誰先到**，而不是「先查再寫」。
+
+**實作細節**
+
+- 請求內容以 SHA-256 雜湊比對，雜湊的是反序列化後的 DTO，因此 JSON 的空白、欄位順序不同但內容相同，仍視為同一個請求
+- 主鍵衝突後，失敗的實體仍被 `DbContext` 追蹤，必須設為 `Detached`，否則之後建立預約的 `SaveChanges` 會再次嘗試寫入它
+- 完成與釋放用 `ExecuteUpdateAsync` / `ExecuteDeleteAsync` 直接送出 SQL，不需要先讀取；並使用 `CancellationToken.None`，用戶端中斷連線時仍會完成記錄或清理
+
+### 7. 其他
 
 - 外鍵一律 `Restrict`：預約是歷史紀錄，不會因為刪除師傅或客戶而被連帶刪除
 - 欄位型別與長度全部用 Fluent API 設定（`Data/Configurations/`），Entity 類別保持乾淨
@@ -209,6 +241,7 @@ ORDER BY Revenue DESC, p.Id;
 ```powershell
 dotnet run --project tools/ConcurrencyTester                                   # 100 個請求搶同一時段
 dotnet run --project tools/ConcurrencyTester -- --scenario cancel              # 100 個請求取消同一筆預約
+dotnet run --project tools/ConcurrencyTester -- --scenario idempotency         # 100 個帶同一個 Idempotency-Key 的相同請求
 dotnet run --project tools/ConcurrencyTester -- --base-url http://localhost:8080   # 對 Docker 版本測試
 ```
 
@@ -227,6 +260,7 @@ dotnet run --project tools/ConcurrencyTester -- --base-url http://localhost:8080
 | 建立預約 | 201 × 1、409 × 99（25 個由唯一索引擋下） | 201 × 1、409 × 99（2） | 201 × 1、409 × 99（7） |
 | 取消預約 | 200 × 1、409 × 99（29 個由 RowVersion 擋下） | 200 × 1、409 × 99（4） | 200 × 1、409 × 99（2） |
 | **對照：拿掉唯一索引** | **201 × 56** | **201 × 61** | **201 × 68** |
+| 同一個 Idempotency-Key | 只建立 1 筆；409（處理中）× 99 | 只建立 1 筆；409 × 99 | 只建立 1 筆；201 回放 × 2、409 × 97 |
 
 - 唯一索引存在時，**每一次**都有請求通過了應用程式的檢查，最後才被索引擋下
 - 拿掉索引（`scripts/experiments/day3-1-drop-unique-index.sql`）後，同一師傅、同一時段在資料庫中出現 56～68 筆有效預約；以 `day3-2-restore-unique-index.sql` 清理並還原後，結果回到 1 筆成功
@@ -281,6 +315,10 @@ ORDER BY StartTime DESC;
 - **未實作身分驗證與授權**
 - **時區簡化**：只支援台灣時間，且不帶時區資訊；跨時區營運需改存 UTC 或 `datetimeoffset`
 - **分頁使用 OFFSET**：頁數很深時效能下降，資料量大時可改用 keyset（游標）分頁
+- **冪等性**
+  - Key 不分用戶端（沒有身分驗證），不同用戶端使用相同的 Key 會互相影響；正式系統應以「使用者 + Key」為範圍
+  - 紀錄不會過期；正式系統應定期清除（例如保留 24 小時）
+  - 建立預約與記錄結果是兩次寫入：若程序剛好在兩者之間中止，該 Key 會一直停在「處理中」（409）。可用同一個交易包住，或讓處理中的紀錄在一段時間後失效
 
 ---
 
