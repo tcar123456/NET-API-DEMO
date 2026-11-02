@@ -217,21 +217,33 @@ dotnet new gitignore
 
 ---
 
-### Day 2：分層、API 與錯誤處理
+### Day 2：分層、API 與錯誤處理 ✅ 2026-11-02 完成
 
 **任務**
-- [ ] 建立 DTO（Request / Response），不直接回傳 Entity
-- [ ] 建立 Repository 介面與實作
-- [ ] 建立 Service 介面與實作，商業規則（營業時間、整點、不可過去）寫在 Service
-- [ ] 建立 Controller，完成第五節的所有 API（取消與並發處理可先留簡單版本）
-- [ ] 在 `Program.cs` 用 DI 註冊 Service 與 Repository，並理解為什麼用 Scoped
-- [ ] 建立自訂例外（NotFound、BusinessRule、Conflict）與全域錯誤處理 Middleware，統一回傳 ProblemDetails
-- [ ] 確認 Swagger UI 能顯示所有 API（範本內建，不另加套件）
-- [ ] 所有資料庫操作都用 async，並傳遞 CancellationToken
+- [x] 建立 DTO（Request / Response），不直接回傳 Entity（DTO 用 `record`）
+- [x] 建立 Repository 介面與實作（Provider、Service、Customer、Booking）
+- [x] 建立 Service 介面與實作，商業規則（營業時間、整點、不可過去）寫在 Service（`ICatalogService`、`IBookingService`）
+- [x] 建立 Controller，完成第五節的所有 API（取消與並發處理可先留簡單版本）
+- [x] 在 `Program.cs` 用 DI 註冊 Service 與 Repository，並理解為什麼用 Scoped
+- [x] 建立自訂例外（NotFound、BusinessRule、Conflict）與全域錯誤處理 Middleware，統一回傳 ProblemDetails
+- [x] 確認 Swagger UI 能顯示所有 API（範本內建，不另加套件）
+- [x] 所有資料庫操作都用 async，並傳遞 CancellationToken
 
 **學習重點**：介面、依賴注入與三種生命週期、async/await、例外處理、HTTP 狀態碼
 
 **完成標準**：可以用 Swagger UI 走完「查時段 → 建立預約 → 查詢 → 取消」的完整流程；錯誤回應格式一致。
+
+**實作決定**
+- 現在時間透過注入 `TimeProvider`（.NET 8 內建）取得，換算為 UTC+8，Day 3 單元測試可換成固定時間
+- `startTime` 必須是不帶時區的台灣時間；帶 `Z` 或 `+08:00` 一律回 400，避免時區混用
+- 停用的師傅（`IsActive = false`）視同不存在，回 404
+- 建立預約保留「先查再寫」，提供一般情況下清楚的 409 訊息；並發時的保證由唯一索引負責，例外轉換留到 Day 3
+- 取消預約目前沒有捕捉 `DbUpdateConcurrencyException`（RowVersion 衝突會回 500），留到 Day 3
+- 分頁 `pageSize` 上限 100；排序為 `StartTime` 降冪、`Id` 降冪
+- `AddProblemDetails()` + `UseStatusCodePages()` 讓不存在的路由也回 ProblemDetails
+- `SuppressAsyncSuffixInActionNames = false`：action 名稱保留 `Async` 結尾，`CreatedAtAction` 才找得到路由
+
+**驗證紀錄**：以腳本呼叫全部 7 支 API，共 26 種情境（正常流程與錯誤情況）。建立預約回 201 並帶 `Location`；同時段重複預約回 409；取消後時段重新開放；重複取消回 409；非整點、超出營業時間、過去時間、帶時區的時間都回 400；不存在的師傅、服務、客戶、預約回 404；缺少 `date` 參數回 400；所有錯誤皆為 `application/problem+json`。Swagger 文件列出全部 7 支 API 及其狀態碼。
 
 ---
 
