@@ -1,9 +1,9 @@
 namespace BookingApi.Tests.TestDoubles;
 
-// 讓「現在時間」固定，測試結果不會因為執行的日期或時間而改變
+// 讓「現在時間」固定，測試結果不會因為執行的日期或時間而改變；需要模擬時間經過時呼叫 Advance
 public class FixedTimeProvider : TimeProvider
 {
-    private readonly DateTimeOffset _utcNow;
+    private DateTimeOffset _utcNow;
 
     private FixedTimeProvider(DateTimeOffset utcNow)
     {
@@ -16,4 +16,6 @@ public class FixedTimeProvider : TimeProvider
     }
 
     public override DateTimeOffset GetUtcNow() => _utcNow.ToUniversalTime();
+
+    public void Advance(TimeSpan duration) => _utcNow += duration;
 }

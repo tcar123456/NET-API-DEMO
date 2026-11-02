@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using BookingApi.Caching;
 using BookingApi.Domain;
 using BookingApi.Dtos;
 using BookingApi.Exceptions;
@@ -19,6 +20,7 @@ public class BookingService : IBookingService
     private readonly IServiceRepository _serviceRepository;
     private readonly ICustomerRepository _customerRepository;
     private readonly IIdempotencyRepository _idempotencyRepository;
+    private readonly ISlotCache _slotCache;
     private readonly TimeProvider _timeProvider;
 
     public BookingService(
@@ -27,6 +29,7 @@ public class BookingService : IBookingService
         IServiceRepository serviceRepository,
         ICustomerRepository customerRepository,
         IIdempotencyRepository idempotencyRepository,
+        ISlotCache slotCache,
         TimeProvider timeProvider)
     {
         _bookingRepository = bookingRepository;
@@ -34,6 +37,7 @@ public class BookingService : IBookingService
         _serviceRepository = serviceRepository;
         _customerRepository = customerRepository;
         _idempotencyRepository = idempotencyRepository;
+        _slotCache = slotCache;
         _timeProvider = timeProvider;
     }
 
@@ -93,8 +97,15 @@ public class BookingService : IBookingService
         var dayStart = date.ToDateTime(new TimeOnly(BookingRules.OpeningHour, 0));
         var dayEnd = date.ToDateTime(new TimeOnly(BookingRules.ClosingHour, 0));
 
-        var bookedStartTimes = (await _bookingRepository.GetActiveStartTimesAsync(
-            providerId, dayStart, dayEnd, cancellationToken)).ToHashSet();
+        // 快取的是「已被預約的時間」而不是「可預約時段」：後者會隨現在時間變化（過去的時段要排除），不適合快取
+        var startTimes = await _slotCache.GetBookedStartTimesAsync(providerId, date, cancellationToken);
+        if (startTimes is null)
+        {
+            startTimes = await _bookingRepository.GetActiveStartTimesAsync(providerId, dayStart, dayEnd, cancellationToken);
+            await _slotCache.SetBookedStartTimesAsync(providerId, date, startTimes, cancellationToken);
+        }
+
+        var bookedStartTimes = startTimes.ToHashSet();
         var now = _timeProvider.GetTaiwanNow();
 
         var slots = new List<TimeSlotResponse>();
@@ -145,6 +156,9 @@ public class BookingService : IBookingService
         _bookingRepository.Add(booking);
         await _bookingRepository.SaveChangesAsync(cancellationToken);
 
+        // 預約已寫入，即使用戶端此時斷線也要清掉快取，因此不使用請求的 CancellationToken
+        await _slotCache.InvalidateAsync(booking.ProviderId, DateOnly.FromDateTime(booking.StartTime), CancellationToken.None);
+
         return await GetByIdAsync(booking.Id, cancellationToken);
     }
 
@@ -169,6 +183,8 @@ public class BookingService : IBookingService
         booking.Status = BookingStatus.Cancelled;
         booking.CancelledAt = _timeProvider.GetTaiwanNow();
         await _bookingRepository.SaveChangesAsync(cancellationToken);
+
+        await _slotCache.InvalidateAsync(booking.ProviderId, DateOnly.FromDateTime(booking.StartTime), CancellationToken.None);
 
         return BookingResponse.FromEntity(booking);
     }

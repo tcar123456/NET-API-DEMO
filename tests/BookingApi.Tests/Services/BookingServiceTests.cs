@@ -1,3 +1,4 @@
+using BookingApi.Caching;
 using BookingApi.Domain;
 using BookingApi.Dtos;
 using BookingApi.Exceptions;
@@ -18,6 +19,7 @@ public class BookingServiceTests
     private readonly IServiceRepository _serviceRepository = Substitute.For<IServiceRepository>();
     private readonly ICustomerRepository _customerRepository = Substitute.For<ICustomerRepository>();
     private readonly IIdempotencyRepository _idempotencyRepository = Substitute.For<IIdempotencyRepository>();
+    private readonly ISlotCache _slotCache = Substitute.For<ISlotCache>();
     private readonly BookingService _sut;
 
     private readonly Provider _provider = new() { Id = 1, Name = "Provider", IsActive = true };
@@ -39,7 +41,13 @@ public class BookingServiceTests
             _serviceRepository,
             _customerRepository,
             _idempotencyRepository,
+            _slotCache,
             FixedTimeProvider.AtTaiwanTime(Now));
+
+        // 預設沒有快取。NSubstitute 對回傳介面的方法預設會給一個假的物件（空清單），必須明確設為 null
+        _slotCache
+            .GetBookedStartTimesAsync(Arg.Any<int>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns((IReadOnlyList<DateTime>?)null);
     }
 
     // ---------- CreateAsync：時間規則 ----------
@@ -230,7 +238,75 @@ public class BookingServiceTests
             () => _sut.GetAvailableSlotsAsync(99, DateOnly.FromDateTime(Now), CancellationToken.None));
     }
 
+    [Fact]
+    public async Task GetAvailableSlotsAsync_CacheHit_DoesNotQueryDatabase()
+    {
+        var tomorrow = DateOnly.FromDateTime(Now.AddDays(1));
+        _slotCache
+            .GetBookedStartTimesAsync(_provider.Id, tomorrow, Arg.Any<CancellationToken>())
+            .Returns(new List<DateTime> { Tomorrow(10), Tomorrow(11) });
+
+        var slots = await _sut.GetAvailableSlotsAsync(_provider.Id, tomorrow, CancellationToken.None);
+
+        Assert.Equal(7, slots.Count);
+        Assert.DoesNotContain(slots, s => s.StartTime == Tomorrow(10) || s.StartTime == Tomorrow(11));
+        await _bookingRepository.DidNotReceive().GetActiveStartTimesAsync(
+            Arg.Any<int>(), Arg.Any<DateTime>(), Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GetAvailableSlotsAsync_CacheMiss_QueriesDatabaseAndStoresResult()
+    {
+        var tomorrow = DateOnly.FromDateTime(Now.AddDays(1));
+        var booked = new List<DateTime> { Tomorrow(15) };
+        _bookingRepository
+            .GetActiveStartTimesAsync(_provider.Id, Tomorrow(10), Tomorrow(19), Arg.Any<CancellationToken>())
+            .Returns(booked);
+
+        var slots = await _sut.GetAvailableSlotsAsync(_provider.Id, tomorrow, CancellationToken.None);
+
+        Assert.Equal(8, slots.Count);
+        await _slotCache.Received(1).SetBookedStartTimesAsync(_provider.Id, tomorrow, booked, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CreateAsync_Success_InvalidatesCacheForThatProviderAndDay()
+    {
+        SetUpSuccessfulSave();
+
+        await _sut.CreateAsync(Request(Tomorrow(14)), CancellationToken.None);
+
+        await _slotCache.Received(1).InvalidateAsync(
+            _provider.Id, DateOnly.FromDateTime(Tomorrow(14)), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CreateAsync_Rejected_DoesNotInvalidateCache()
+    {
+        _bookingRepository
+            .HasActiveBookingAsync(_provider.Id, Tomorrow(14), Arg.Any<CancellationToken>())
+            .Returns(true);
+
+        await Assert.ThrowsAsync<ConflictException>(
+            () => _sut.CreateAsync(Request(Tomorrow(14)), CancellationToken.None));
+
+        await _slotCache.DidNotReceive().InvalidateAsync(
+            Arg.Any<int>(), Arg.Any<DateOnly>(), Arg.Any<CancellationToken>());
+    }
+
     // ---------- CancelAsync ----------
+
+    [Fact]
+    public async Task CancelAsync_ActiveBooking_InvalidatesCacheForThatProviderAndDay()
+    {
+        var booking = BookingWithDetails(BookingStatus.Active);
+        _bookingRepository.GetByIdForUpdateAsync(booking.Id, Arg.Any<CancellationToken>()).Returns(booking);
+
+        await _sut.CancelAsync(booking.Id, CancellationToken.None);
+
+        await _slotCache.Received(1).InvalidateAsync(
+            _provider.Id, DateOnly.FromDateTime(booking.StartTime), Arg.Any<CancellationToken>());
+    }
 
     [Fact]
     public async Task CancelAsync_ActiveBooking_SetsCancelledStatusAndTime()
