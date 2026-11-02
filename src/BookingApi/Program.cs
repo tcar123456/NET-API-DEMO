@@ -1,8 +1,10 @@
+using BookingApi.Caching;
 using BookingApi.Data;
 using BookingApi.Middleware;
 using BookingApi.Repositories;
 using BookingApi.Services;
 using Microsoft.EntityFrameworkCore;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,6 +24,30 @@ builder.Services.AddScoped<IBookingRepository, BookingRepository>();
 builder.Services.AddScoped<IIdempotencyRepository, IdempotencyRepository>();
 builder.Services.AddScoped<ICatalogService, CatalogService>();
 builder.Services.AddScoped<IBookingService, BookingService>();
+
+// 可預約時段快取：有設定 Redis 連線字串時用 Redis，否則用記憶體快取（單機開發與測試）。
+// 程式只依賴 IDistributedCache，換實作不需要改其他程式碼
+var redisConnectionString = builder.Configuration.GetConnectionString("Redis");
+if (string.IsNullOrWhiteSpace(redisConnectionString))
+{
+    builder.Services.AddDistributedMemoryCache();
+}
+else
+{
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        var redisOptions = ConfigurationOptions.Parse(redisConnectionString);
+        // Redis 暫時連不上時不要讓 API 啟動失敗，也不要讓每個請求等太久；快取失敗會改查資料庫
+        redisOptions.AbortOnConnectFail = false;
+        redisOptions.ConnectTimeout = 1000;
+        redisOptions.ConnectRetry = 1;
+        redisOptions.AsyncTimeout = 1000;
+        options.ConfigurationOptions = redisOptions;
+        options.InstanceName = "booking:";
+    });
+}
+
+builder.Services.AddSingleton<ISlotCache, DistributedSlotCache>();
 
 // 報表用 Dapper：連線工廠只保存連線字串、沒有其他狀態，可以是 Singleton
 builder.Services.AddSingleton<ISqlConnectionFactory>(new SqlConnectionFactory(connectionString));

@@ -19,6 +19,15 @@ services:
       retries: 20
       start_period: 10s
 
+  redis:
+    # 只在 Compose 內部網路使用，不對主機開放埠
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: .
@@ -28,11 +37,15 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       # 雙底線 __ 對應設定的階層，等同 appsettings 中的 ConnectionStrings:BookingDb
       ConnectionStrings__BookingDb: "Server=sqlserver,1433;Database=BookingDb;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
+      # 可預約時段快取；未設定時 API 改用記憶體快取
+      ConnectionStrings__Redis: "redis:6379"
     ports:
       - "${API_HOST_PORT:-8080}:8080"
     depends_on:
       sqlserver:
         # 等 SQL Server 健康檢查通過才啟動 API，否則 API 套用 Migration 時可能連不上
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:
