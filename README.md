@@ -67,6 +67,7 @@ dotnet test                             # 單元測試
 | GET | `/api/bookings/{id}` | 查單筆預約 | 200 | 404 |
 | POST | `/api/bookings/{id}/cancel` | 取消預約 | 200 | 404、409 |
 | GET | `/api/customers/{id}/bookings?page=1&pageSize=20` | 客戶預約紀錄（分頁） | 200 | 400、404 |
+| GET | `/api/reports/monthly-revenue?year=2026&month=11` | 某月各師傅的預約數、取消數與營收（Dapper） | 200 | 400 |
 
 **建立預約**
 
@@ -154,7 +155,46 @@ UPDATE Bookings SET Status = 2, ... WHERE Id = @id AND RowVersion = @originalVer
 
 取消是**狀態變更**，資料會保留；用 `DELETE` 會讓呼叫方以為資料被刪除。重複取消回 409，而不是當作成功。
 
-### 5. 其他
+### 5. 報表用 Dapper + 手寫 T-SQL，其餘用 EF Core
+
+`GET /api/reports/monthly-revenue` 由 `ReportRepository` 以 Dapper 執行手寫的 T-SQL：
+
+```sql
+SELECT p.Id AS ProviderId, p.Name AS ProviderName,
+       COUNT(CASE WHEN b.Status = @Active THEN 1 END)    AS BookingCount,
+       COUNT(CASE WHEN b.Status = @Cancelled THEN 1 END) AS CancelledCount,
+       COALESCE(SUM(CASE WHEN b.Status = @Active THEN s.Price END), 0) AS Revenue
+FROM dbo.Providers AS p
+LEFT JOIN dbo.Bookings AS b
+    ON b.ProviderId = p.Id AND b.StartTime >= @From AND b.StartTime < @To
+LEFT JOIN dbo.Services AS s ON s.Id = b.ServiceId
+WHERE p.IsActive = 1 OR b.Id IS NOT NULL
+GROUP BY p.Id, p.Name
+ORDER BY Revenue DESC, p.Id;
+```
+
+**為什麼這裡選 Dapper**
+
+| | EF Core（預約的增刪改查） | Dapper（報表） |
+|---|---|---|
+| 適合 | 以 Entity 為單位讀寫、需要變更追蹤與 Migration | 唯讀的彙總查詢，結果是扁平的統計列 |
+| SQL | 由 LINQ 產生，複雜的 GROUP BY 不易預測最後的 SQL | 自己寫，送到資料庫的就是這段，可直接貼到 SSMS 看執行計畫 |
+| 成本 | 有變更追蹤與 LINQ 翻譯的開銷 | 只做「執行 SQL → 對應到物件」，額外開銷很小 |
+| 風險 | 欄位改名時編譯期就會發現 | SQL 是字串，改名要靠測試才發現 |
+
+**寫法上的重點**
+
+- `LEFT JOIN` 並把期間條件放在 `ON`：當月沒有預約的師傅也會出現（數量 0、營收 0）。若把期間條件放在 `WHERE`，這些師傅會被過濾掉
+- 條件彙總 `COUNT(CASE WHEN ...)`：一次掃描同時算出有效數與取消數
+- 期間用半開區間 `[當月 1 日, 下月 1 日)`，不需要處理每月天數與 23:59:59 的邊界
+- Dapper 預設把 `DateTime` 當成 SQL 的 `datetime`；欄位是 `datetime2`，因此以 `DbType.DateTime2` 明確指定參數型別
+- 連線由 `ISqlConnectionFactory` 建立（Singleton，只保存連線字串），每次查詢 `using` 一個新連線，由 SqlClient 連線池重複使用實體連線
+
+**在 100 萬筆資料上**（`BookingPerfDb`，查 2026-10，200 位師傅）：邏輯讀取 4,951、平均 42 ms。因為沒有以 `StartTime` 開頭的索引，SQL Server 改為掃描最窄、且包含所需欄位的 `IX_Bookings_Customer_Start`。SQL Server 建議加上 `(ProviderId, StartTime) INCLUDE (ServiceId, Status)`（預估改善 89.7%）；報表通常每月執行少數幾次，目前**沒有**為它新增索引，以免增加每次建立預約的寫入成本。
+
+**已知限制**：營收以目前的 `Services.Price` 計算；若服務調價，過去月份的營收也會跟著改變。正式系統應在預約時把價格寫入預約資料。
+
+### 6. 其他
 
 - 外鍵一律 `Restrict`：預約是歷史紀錄，不會因為刪除師傅或客戶而被連帶刪除
 - 欄位型別與長度全部用 Fluent API 設定（`Data/Configurations/`），Entity 類別保持乾淨
@@ -262,7 +302,7 @@ ORDER BY StartTime DESC;
 ├── src/BookingApi/
 │   ├── Controllers/        HTTP 端點
 │   ├── Services/           商業規則
-│   ├── Repositories/       資料存取（EF Core）
+│   ├── Repositories/       資料存取（EF Core；報表用 Dapper）
 │   ├── Domain/             Entity、Enum、業務常數
 │   ├── Dtos/               Request / Response
 │   ├── Data/               AppDbContext、Fluent API 設定、種子資料
@@ -285,6 +325,7 @@ ORDER BY StartTime DESC;
 | 執行環境 | .NET 8（LTS） | 與多數既有企業系統的版本一致；小型 Web API 在 .NET 8 與 .NET 10 的寫法幾乎相同，升級成本低 |
 | Web 框架 | ASP.NET Core Controller | 企業既有系統多為 Controller 架構，也較能呈現分層與依賴注入 |
 | ORM | EF Core 8 | 一般 CRUD 開發快，並以 Migration 管理 schema |
+| 輕量查詢 | Dapper | 報表等唯讀彙總查詢，手寫 T-SQL、結果可預期 |
 | 資料庫 | SQL Server 2022（Docker） | 唯一篩選索引、rowversion、執行計畫分析 |
 | API 文件 | Swagger UI（Swashbuckle，.NET 8 範本內建） | 不需要額外套件 |
 | 測試 | xUnit + NSubstitute | 以假的 Repository 只測 Service 的商業規則 |
