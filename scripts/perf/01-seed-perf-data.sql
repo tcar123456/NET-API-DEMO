@@ -1,6 +1,6 @@
 -- Day 5 效能調校：在 BookingPerfDb 產生 100 萬筆預約
 --
--- 前提：已建立 BookingPerfDb 並套用 InitialCreate Migration（見 PLAN.md Day 5 的執行步驟）
+-- 前提：已建立 BookingPerfDb 並套用 InitialCreate Migration（見同資料夾的 README.md）
 -- 寫法：每張表都是一個 INSERT ... SELECT 搭配 GENERATE_SERIES（SQL Server 2022），不用迴圈逐筆新增
 --
 -- 資料分布：

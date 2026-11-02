@@ -482,3 +482,8 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Local-only documents (study plan, tech stack notes, personal notes)
+PLAN.md
+TECH_STACK.md
+notes/
