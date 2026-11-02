@@ -18,6 +18,8 @@ public class AppDbContext : DbContext
 
     public DbSet<Booking> Bookings => Set<Booking>();
 
+    public DbSet<IdempotencyRecord> IdempotencyRecords => Set<IdempotencyRecord>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         // 載入此組件中所有 IEntityTypeConfiguration<T> 實作（Data/Configurations/）

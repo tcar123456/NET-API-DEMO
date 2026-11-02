@@ -133,6 +133,32 @@ namespace BookingApi.Migrations
                         });
                 });
 
+            modelBuilder.Entity("BookingApi.Domain.IdempotencyRecord", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .IsUnicode(false)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("ResponseBody")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("StatusCode")
+                        .HasColumnType("int");
+
+                    b.HasKey("Key");
+
+                    b.ToTable("IdempotencyRecords");
+                });
+
             modelBuilder.Entity("BookingApi.Domain.Provider", b =>
                 {
                     b.Property<int>("Id")

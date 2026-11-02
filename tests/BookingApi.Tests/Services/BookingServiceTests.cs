@@ -17,6 +17,7 @@ public class BookingServiceTests
     private readonly IProviderRepository _providerRepository = Substitute.For<IProviderRepository>();
     private readonly IServiceRepository _serviceRepository = Substitute.For<IServiceRepository>();
     private readonly ICustomerRepository _customerRepository = Substitute.For<ICustomerRepository>();
+    private readonly IIdempotencyRepository _idempotencyRepository = Substitute.For<IIdempotencyRepository>();
     private readonly BookingService _sut;
 
     private readonly Provider _provider = new() { Id = 1, Name = "Provider", IsActive = true };
@@ -37,6 +38,7 @@ public class BookingServiceTests
             _providerRepository,
             _serviceRepository,
             _customerRepository,
+            _idempotencyRepository,
             FixedTimeProvider.AtTaiwanTime(Now));
     }
 
@@ -275,7 +277,153 @@ public class BookingServiceTests
             () => _sut.GetCustomerBookingsAsync(_customer.Id, page, pageSize, CancellationToken.None));
     }
 
+    // ---------- CreateAsync：Idempotency-Key ----------
+
+    [Fact]
+    public async Task CreateAsync_WithoutIdempotencyKey_DoesNotUseIdempotencyStore()
+    {
+        SetUpSuccessfulSave();
+
+        var result = await _sut.CreateAsync(Request(Tomorrow(14)), idempotencyKey: null, CancellationToken.None);
+
+        Assert.False(result.IsReplay);
+        await _idempotencyRepository.DidNotReceive().TryReserveAsync(Arg.Any<IdempotencyRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task CreateAsync_BlankIdempotencyKey_ThrowsBusinessRuleException(string key)
+    {
+        await Assert.ThrowsAsync<BusinessRuleException>(
+            () => _sut.CreateAsync(Request(Tomorrow(14)), key, CancellationToken.None));
+
+        await _idempotencyRepository.DidNotReceive().TryReserveAsync(Arg.Any<IdempotencyRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CreateAsync_IdempotencyKeyTooLong_ThrowsBusinessRuleException()
+    {
+        await Assert.ThrowsAsync<BusinessRuleException>(
+            () => _sut.CreateAsync(Request(Tomorrow(14)), new string('k', 101), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CreateAsync_NewIdempotencyKey_ReservesCreatesAndStoresResponse()
+    {
+        SetUpSuccessfulSave();
+        var reserved = CaptureReservation(succeeds: true);
+
+        var result = await _sut.CreateAsync(Request(Tomorrow(14)), "key-1", CancellationToken.None);
+
+        Assert.False(result.IsReplay);
+        Assert.Equal("key-1", reserved()?.Key);
+        Assert.Equal(64, reserved()?.RequestHash.Length);
+        await _idempotencyRepository.Received(1).CompleteAsync(
+            "key-1", 201, Arg.Is<string>(body => body.Contains("\"startTime\"")), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CreateAsync_SameKeySameRequest_ReplaysFirstResultWithoutCreatingAgain()
+    {
+        // 第一次：正常建立，記下寫入的雜湊與回應內容
+        SetUpSuccessfulSave();
+        var reserved = CaptureReservation(succeeds: true);
+        string? storedBody = null;
+        _idempotencyRepository
+            .CompleteAsync("key-1", 201, Arg.Do<string>(body => storedBody = body), Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+        var first = await _sut.CreateAsync(Request(Tomorrow(14)), "key-1", CancellationToken.None);
+
+        // 第二次：Key 已存在且已完成
+        CaptureReservation(succeeds: false);
+        _idempotencyRepository.GetAsync("key-1", Arg.Any<CancellationToken>())
+            .Returns(CompletedRecord("key-1", HashOf(reserved), storedBody));
+
+        var second = await _sut.CreateAsync(Request(Tomorrow(14)), "key-1", CancellationToken.None);
+
+        Assert.True(second.IsReplay);
+        Assert.Equal(first.Booking, second.Booking);
+        _bookingRepository.Received(1).Add(Arg.Any<Booking>());
+    }
+
+    [Fact]
+    public async Task CreateAsync_SameKeyDifferentRequest_ThrowsIdempotencyKeyReusedException()
+    {
+        SetUpSuccessfulSave();
+        var reserved = CaptureReservation(succeeds: true);
+        await _sut.CreateAsync(Request(Tomorrow(14)), "key-1", CancellationToken.None);
+
+        CaptureReservation(succeeds: false);
+        _idempotencyRepository.GetAsync("key-1", Arg.Any<CancellationToken>())
+            .Returns(CompletedRecord("key-1", HashOf(reserved), "{}"));
+
+        await Assert.ThrowsAsync<IdempotencyKeyReusedException>(
+            () => _sut.CreateAsync(Request(Tomorrow(15)), "key-1", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CreateAsync_SameKeyStillProcessing_ThrowsConflictException()
+    {
+        SetUpSuccessfulSave();
+        var reserved = CaptureReservation(succeeds: true);
+        await _sut.CreateAsync(Request(Tomorrow(14)), "key-1", CancellationToken.None);
+
+        CaptureReservation(succeeds: false);
+        var processing = CompletedRecord("key-1", HashOf(reserved), responseBody: null);
+        processing.StatusCode = null;
+        _idempotencyRepository.GetAsync("key-1", Arg.Any<CancellationToken>()).Returns(processing);
+
+        var exception = await Assert.ThrowsAsync<ConflictException>(
+            () => _sut.CreateAsync(Request(Tomorrow(14)), "key-1", CancellationToken.None));
+
+        Assert.Contains("still being processed", exception.Message);
+    }
+
+    [Fact]
+    public async Task CreateAsync_CreationFails_ReleasesIdempotencyKey()
+    {
+        CaptureReservation(succeeds: true);
+        _bookingRepository
+            .HasActiveBookingAsync(_provider.Id, Tomorrow(14), Arg.Any<CancellationToken>())
+            .Returns(true);
+
+        await Assert.ThrowsAsync<ConflictException>(
+            () => _sut.CreateAsync(Request(Tomorrow(14)), "key-1", CancellationToken.None));
+
+        await _idempotencyRepository.Received(1).ReleaseAsync("key-1", Arg.Any<CancellationToken>());
+        await _idempotencyRepository.DidNotReceive().CompleteAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
     // ---------- 測試輔助 ----------
+
+    // 設定 TryReserveAsync 的結果，並回傳一個可取得「最後一次寫入的紀錄」的函式
+    private Func<IdempotencyRecord?> CaptureReservation(bool succeeds)
+    {
+        IdempotencyRecord? captured = null;
+        _idempotencyRepository
+            .TryReserveAsync(Arg.Do<IdempotencyRecord>(r => captured = r), Arg.Any<CancellationToken>())
+            .Returns(succeeds);
+        return () => captured;
+    }
+
+    private static string HashOf(Func<IdempotencyRecord?> reserved)
+    {
+        return reserved()?.RequestHash ?? throw new InvalidOperationException("TryReserveAsync was not called.");
+    }
+
+    private static IdempotencyRecord CompletedRecord(string key, string requestHash, string? responseBody)
+    {
+        return new IdempotencyRecord
+        {
+            Key = key,
+            RequestHash = requestHash,
+            StatusCode = 201,
+            ResponseBody = responseBody,
+            CreatedAt = Now,
+        };
+    }
+
 
     private CreateBookingRequest Request(DateTime startTime)
     {
