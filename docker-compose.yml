@@ -1,0 +1,39 @@
+name: booking-api
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env (copy .env.example)}
+    ports:
+      # 主機用 14330，避免與本機開發用的 SQL Server（1433）衝突；SSMS 連 localhost,14330
+      - "${SQL_HOST_PORT:-14330}:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      # $$ 讓 Compose 不展開變數，交給容器內的 shell 讀取環境變數
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q \"SELECT 1\" -b -o /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: src/BookingApi/Dockerfile
+    environment:
+      # Development：啟動時自動套用 Migration 與種子資料，並開啟 Swagger UI
+      ASPNETCORE_ENVIRONMENT: Development
+      # 雙底線 __ 對應設定的階層，等同 appsettings 中的 ConnectionStrings:BookingDb
+      ConnectionStrings__BookingDb: "Server=sqlserver,1433;Database=BookingDb;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
+    ports:
+      - "${API_HOST_PORT:-8080}:8080"
+    depends_on:
+      sqlserver:
+        # 等 SQL Server 健康檢查通過才啟動 API，否則 API 套用 Migration 時可能連不上
+        condition: service_healthy
+
+volumes:
+  sqlserver-data:
