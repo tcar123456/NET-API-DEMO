@@ -231,7 +231,7 @@ ORDER BY StartTime DESC;
 
 **執行計畫檔**：`docs/perf/stage1-no-index.sqlplan`、`stage2-single-column-index.sqlplan`、`stage3-covering-index.sqlplan`（實際執行計畫，可直接用 SSMS 開啟成圖形）
 
-重現步驟見 `PLAN.md` Day 5。
+重現步驟見 [scripts/perf/README.md](scripts/perf/README.md)。
 
 ---
 
@@ -278,8 +278,24 @@ ORDER BY StartTime DESC;
 └── docs/perf/              三階段的實際執行計畫（.sqlplan）
 ```
 
-## 技術
+## 技術選型
 
-ASP.NET Core 8（Controller）· EF Core 8 · SQL Server 2022 · xUnit · NSubstitute · Swagger（Swashbuckle）· Docker Compose
+| 類別 | 選擇 | 理由 |
+|---|---|---|
+| 執行環境 | .NET 8（LTS） | 與多數既有企業系統的版本一致；小型 Web API 在 .NET 8 與 .NET 10 的寫法幾乎相同，升級成本低 |
+| Web 框架 | ASP.NET Core Controller | 企業既有系統多為 Controller 架構，也較能呈現分層與依賴注入 |
+| ORM | EF Core 8 | 一般 CRUD 開發快，並以 Migration 管理 schema |
+| 資料庫 | SQL Server 2022（Docker） | 唯一篩選索引、rowversion、執行計畫分析 |
+| API 文件 | Swagger UI（Swashbuckle，.NET 8 範本內建） | 不需要額外套件 |
+| 測試 | xUnit + NSubstitute | 以假的 Repository 只測 Service 的商業規則 |
+| 容器 | Docker Compose | 一個指令同時啟動 API 與資料庫 |
 
-詳細規劃與每日進度見 [PLAN.md](PLAN.md)，技術選型理由見 [TECH_STACK.md](TECH_STACK.md)。
+**刻意不使用**
+
+| 技術 | 原因 |
+|---|---|
+| Minimal API | 見上方 Controller 的理由 |
+| MediatR / CQRS | 對這個規模的專案是過度設計 |
+| AutoMapper | 手寫 Entity → DTO 的對應較透明 |
+| 拆成多個專案（Clean Architecture） | 單一專案內以資料夾分層即可；專案變大時再依層拆分 |
+| 身分驗證（JWT） | 不是本專案的重點，列為已知限制 |
