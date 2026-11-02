@@ -1,5 +1,7 @@
 # 預約系統後端 API
 
+[![CI](https://github.com/tcar123456/NET-API-DEMO/actions/workflows/ci.yml/badge.svg)](https://github.com/tcar123456/NET-API-DEMO/actions/workflows/ci.yml)
+
 美容／按摩店家的預約系統後端，使用 **ASP.NET Core 8 Web API + EF Core 8 + SQL Server 2022**。
 
 這是一個 C# / .NET 的練習與展示專案，功能刻意精簡，重點放在：
@@ -7,7 +9,7 @@
 1. **並發控制**：100 個請求同時搶同一個時段，只有 1 筆成功，並以實驗證明
 2. **分層與依賴注入**：Controller → Service → Repository，透過介面溝通，可單元測試
 3. **MS SQL 設計**：唯一篩選索引、樂觀鎖（rowversion）、Migration 管理 schema
-4. **一個指令跑起來**：Docker Compose 同時啟動 API 與資料庫
+4. **一個指令跑起來**：Docker Compose 同時啟動 API、資料庫與 Redis
 
 ---
 
@@ -32,6 +34,7 @@ docker compose up -d --build
 | Swagger UI | http://localhost:8080/swagger |
 | API | http://localhost:8080/api/... |
 | SQL Server（SSMS） | `localhost,14330`，帳號 `sa`，密碼為 `.env` 中的設定，勾選「信任伺服器憑證」 |
+| Redis | 只在 Compose 內部網路使用，不對主機開放 |
 
 API 在開發環境啟動時會自動建立資料庫、套用 Migration，並寫入種子資料（3 位師傅、3 個服務、5 位客戶）。
 
@@ -53,6 +56,15 @@ dotnet user-secrets set 'ConnectionStrings:BookingDb' 'Server=localhost,1433;Dat
 dotnet run --project src/BookingApi     # http://localhost:5120/swagger
 dotnet test                             # 單元測試
 ```
+
+沒有設定 Redis 時，API 改用記憶體快取，其他行為相同。若要在本機使用 Redis：
+
+```powershell
+docker run -d --name booking-redis -p 6379:6379 redis:7-alpine
+dotnet user-secrets set 'ConnectionStrings:Redis' 'localhost:6379' --project src/BookingApi
+```
+
+每次 push 到 `main` 或開 Pull Request，GitHub Actions 會自動建置、執行單元測試，並確認 Dockerfile 可以建置（`.github/workflows/ci.yml`）。
 
 ---
 
@@ -226,7 +238,35 @@ Idempotency-Key: 7eb1cd17-dc1d-4c9b-b5d4-e264e9a60a4d
 - 主鍵衝突後，失敗的實體仍被 `DbContext` 追蹤，必須設為 `Detached`，否則之後建立預約的 `SaveChanges` 會再次嘗試寫入它
 - 完成與釋放用 `ExecuteUpdateAsync` / `ExecuteDeleteAsync` 直接送出 SQL，不需要先讀取；並使用 `CancellationToken.None`，用戶端中斷連線時仍會完成記錄或清理
 
-### 7. 其他
+### 7. 可預約時段快取（Redis）
+
+`GET /api/providers/{id}/available-slots` 是最常被呼叫的查詢，加上 cache-aside 快取：
+
+1. 先查快取 `booking:slots:{師傅}:{日期}`，有就直接用
+2. 沒有就查資料庫，再寫入快取（存活 5 分鐘）
+3. 建立或取消預約成功後，刪除該師傅、該日期的快取
+
+**快取的是「已被預約的開始時間」，不是「可預約時段」**：可預約時段會隨現在時間改變（今天已過去的時段要排除），快取原始資料、每次再計算，結果才不會過時。
+
+**Redis 故障時不影響 API**
+
+| 情況 | 行為 |
+|---|---|
+| Redis 正常 | 查快取，約幾毫秒 |
+| Redis 停機 | 改查資料庫並記錄警告；每次快取操作最多等 500 ms |
+| 停機後 30 秒內 | 斷路器開啟，直接略過快取，不再等待逾時 |
+| 30 秒後 | 再試一次 Redis，恢復後自動重新使用快取 |
+
+實測（Compose，停掉 Redis 容器）：未加斷路器前，每次查詢約 11 秒、建立預約約 6 秒；加上斷路器與 500 ms 上限後，第一次查詢 0.5 秒，之後 3～4 ms，建立預約 0.2 秒。
+
+**為什麼用 `IDistributedCache`，而不是直接用 StackExchange.Redis**
+
+- 程式只依賴 ASP.NET Core 內建的介面：有設定 Redis 連線字串時用 Redis，沒有時用記憶體快取，本機開發與單元測試都不需要 Redis
+- 預約的正確性不依賴快取：重複預約由資料庫唯一索引保證，快取只影響「查詢顯示」
+
+**已知限制**：讀寫交錯時（讀取請求查到舊資料、寫入請求刪除快取後，讀取請求才把舊資料寫回快取），快取可能短暫顯示已被預約的時段為可預約；最多維持 5 分鐘（快取存活時間），且送出預約時仍會被資料庫擋下。
+
+### 8. 其他
 
 - 外鍵一律 `Restrict`：預約是歷史紀錄，不會因為刪除師傅或客戶而被連帶刪除
 - 欄位型別與長度全部用 Fluent API 設定（`Data/Configurations/`），Entity 類別保持乾淨
@@ -324,7 +364,7 @@ ORDER BY StartTime DESC;
 
 ## 如果流量放大一百倍
 
-1. **可預約時段查詢加快取**（例如 Redis），建立或取消預約時清除對應的快取
+1. **快取**：可預約時段已用 Redis 快取；流量更大時可把快取延伸到師傅、服務列表，並改用 Redis 叢集
 2. **讀寫分離**：查詢走唯讀副本，寫入走主資料庫
 3. **建立預約改由訊息佇列排隊處理**，削峰填谷，API 先回「受理中」
 4. **依業務拆分服務**：預約、通知、報表各自獨立部署與擴展
@@ -337,10 +377,12 @@ ORDER BY StartTime DESC;
 ```
 ├── docker-compose.yml
 ├── .env.example
+├── .github/workflows/ci.yml GitHub Actions：建置、測試、Docker 映像檔
 ├── src/BookingApi/
 │   ├── Controllers/        HTTP 端點
 │   ├── Services/           商業規則
 │   ├── Repositories/       資料存取（EF Core；報表用 Dapper）
+│   ├── Caching/            可預約時段快取（IDistributedCache，Redis 或記憶體）
 │   ├── Domain/             Entity、Enum、業務常數
 │   ├── Dtos/               Request / Response
 │   ├── Data/               AppDbContext、Fluent API 設定、種子資料
@@ -367,7 +409,9 @@ ORDER BY StartTime DESC;
 | 資料庫 | SQL Server 2022（Docker） | 唯一篩選索引、rowversion、執行計畫分析 |
 | API 文件 | Swagger UI（Swashbuckle，.NET 8 範本內建） | 不需要額外套件 |
 | 測試 | xUnit + NSubstitute | 以假的 Repository 只測 Service 的商業規則 |
-| 容器 | Docker Compose | 一個指令同時啟動 API 與資料庫 |
+| 快取 | Redis（`IDistributedCache`） | 加速最常用的時段查詢；沒有 Redis 時自動改用記憶體快取 |
+| 容器 | Docker Compose | 一個指令同時啟動 API、資料庫與 Redis |
+| CI | GitHub Actions | push 與 PR 時自動建置、測試、建置 Docker 映像檔 |
 
 **刻意不使用**
 
