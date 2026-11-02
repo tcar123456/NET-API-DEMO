@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 依 global.json 安裝相同版本的 .NET SDK，與本機開發環境一致
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      # 單元測試以 NSubstitute 替換 Repository，不需要資料庫
+      - name: Test
+        run: dotnet test --no-build --configuration Release --verbosity normal
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 確認 Dockerfile 仍然可以建置（不推送映像檔）
+      - name: Build API image
+        run: docker build --file src/BookingApi/Dockerfile --tag booking-api:ci .
