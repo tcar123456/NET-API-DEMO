@@ -29,4 +29,7 @@ POST {{BookingApi_HostAddress}}/api/bookings/1/cancel
 ### 客戶預約紀錄（分頁）
 GET {{BookingApi_HostAddress}}/api/customers/3/bookings?page=1&pageSize=20
 
+### 某月各師傅的預約數與營收（Dapper 報表）
+GET {{BookingApi_HostAddress}}/api/reports/monthly-revenue?year=2026&month=11
+
 ###

@@ -22,6 +22,11 @@ builder.Services.AddScoped<IBookingRepository, BookingRepository>();
 builder.Services.AddScoped<ICatalogService, CatalogService>();
 builder.Services.AddScoped<IBookingService, BookingService>();
 
+// 報表用 Dapper：連線工廠只保存連線字串、沒有其他狀態，可以是 Singleton
+builder.Services.AddSingleton<ISqlConnectionFactory>(new SqlConnectionFactory(connectionString));
+builder.Services.AddScoped<IReportRepository, ReportRepository>();
+builder.Services.AddScoped<IReportService, ReportService>();
+
 // 透過注入取得現在時間，單元測試可以換成固定時間
 builder.Services.AddSingleton(TimeProvider.System);
 
