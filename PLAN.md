@@ -116,9 +116,9 @@ BookingApi/                         ← Git 根目錄，CLAUDE.md 放這裡
 | 名稱 | 內容 | 目的 |
 |---|---|---|
 | UX_Bookings_Provider_Start_Active | UNIQUE (ProviderId, StartTime) WHERE Status = 1 | **防止重複預約的核心** |
-| IX_Bookings_CustomerId | (CustomerId) | EF Core 依慣例為外鍵自動建立（Day 1 Migration 已產生）；第 5 天作為「單欄索引」階段的對照 |
+| ~~IX_Bookings_CustomerId~~ | (CustomerId) | EF Core 依慣例為外鍵自動建立（Day 1 Migration）；第 5 天作為「單欄索引」階段的對照，之後由 `AddCustomerStartIndex` Migration 移除（已被下方複合索引取代） |
 | IX_Bookings_ServiceId | (ServiceId) | EF Core 依慣例為外鍵自動建立 |
-| IX_Bookings_Customer_Start | (CustomerId, StartTime) INCLUDE (...) | 查客戶預約紀錄；第 5 天效能調校時才加 |
+| IX_Bookings_Customer_Start | (CustomerId, StartTime) INCLUDE (ProviderId, ServiceId, EndTime, Status) | 查客戶預約紀錄；第 5 天以 `AddCustomerStartIndex` Migration 加入，同時支援 CustomerId 外鍵 |
 
 > ProviderId 沒有單獨的外鍵索引：EF Core 判斷 `UX_Bookings_Provider_Start_Active` 的第一個欄位已是 ProviderId，因此不另外建立。
 
@@ -312,17 +312,47 @@ dotnet new gitignore
 
 ### 加分版（有時間再做，建議依序挑 1～2 項）
 
-#### Day 5：MS SQL 效能調校（最推薦，職缺特別強調）
+#### Day 5：MS SQL 效能調校（最推薦，職缺特別強調）✅ 2026-11-02 完成
 
-- [ ] 在 `scripts/perf/` 寫 T-SQL 腳本，以集合式寫法（不用迴圈逐筆）塞入約 100 萬筆預約
-  - 注意：要避開唯一索引衝突，例如用較多的師傅數量分散時段，或讓大部分歷史資料狀態為 Cancelled
-- [ ] 針對「查某客戶近半年預約、依時間排序」的查詢，做三階段比較。每個階段都開啟 `SET STATISTICS IO, TIME ON` 與「包含實際執行計畫」，記錄邏輯讀取次數、耗時、執行計畫截圖：
+- [x] 在 `scripts/perf/` 寫 T-SQL 腳本，以集合式寫法（不用迴圈逐筆）塞入約 100 萬筆預約（`01-seed-perf-data.sql`，`GENERATE_SERIES`，31 秒）
+  - 注意：要避開唯一索引衝突，例如用較多的師傅數量分散時段，或讓大部分歷史資料狀態為 Cancelled（做法：200 位師傅，每個 (師傅, 時段) 只出現一次）
+- [x] 針對「查某客戶近半年預約、依時間排序」的查詢，做三階段比較。每個階段都開啟 `SET STATISTICS IO, TIME ON` 與「包含實際執行計畫」，記錄邏輯讀取次數、耗時、執行計畫截圖：
   1. **無索引**：在實驗腳本中暫時 `DROP INDEX IX_Bookings_CustomerId`（預期看到 Scan）
   2. **單欄外鍵索引**：重建 `IX_Bookings_CustomerId`，恢復 Migration 的原狀（預期看到 Seek + Key Lookup + Sort）
   3. **複合覆蓋索引**：加上 `IX_Bookings_Customer_Start (CustomerId, StartTime) INCLUDE (...)`（預期只有 Seek，沒有 Key Lookup 與 Sort）
-  - 預期結果為推測，實際執行計畫取決於資料量與分布，以實測為準
+  - 預期結果為推測，實際執行計畫取決於資料量與分布，以實測為準（實測三個階段都符合預期）
   - 階段 1 只在實驗用的 T-SQL 腳本中進行，結束後必須確認 `IX_Bookings_CustomerId` 已恢復；正式 schema 的變更（加入 `IX_Bookings_Customer_Start`）要透過新的 Migration
-- [ ] 把三階段比較與截圖寫進 README，說明 Key Lookup 與覆蓋索引的差異
+- [x] 把三階段比較與截圖寫進 README，說明 Key Lookup 與覆蓋索引的差異（以 `docs/perf/*.sqlplan` 實際執行計畫檔取代截圖，可用 SSMS 開啟成圖形）
+
+**實作決定**
+- 使用獨立的 `BookingPerfDb`（同一個 `booking-sql` 容器），不污染開發用的 `BookingDb`；會修改資料或索引的腳本都會先檢查資料庫名稱
+- 查詢用 `sp_executesql` 參數化，與 EF Core 送出的查詢形式相同
+- 數據取自 `sys.dm_exec_query_stats`（6 次執行平均）；實際執行計畫取自 `sys.dm_exec_query_plan_stats`（需開啟 `LAST_QUERY_PLAN_STATS`）
+- INCLUDE 欄位只放這個查詢用到的：ProviderId、ServiceId、EndTime、Status（Id 是叢集索引鍵，本來就在每個非叢集索引中）
+
+**結果**（100 萬筆，查詢回傳 34 筆）
+
+| 階段 | 執行計畫 | 邏輯讀取 | 平均耗時 | 平均 CPU |
+|---|---|---|---|---|
+| 1. 無索引 | Clustered Index Scan（平行）→ Sort | 8,484 | 8.4 ms | 62.5 ms |
+| 2. 單欄外鍵索引 | Index Seek（100 列）→ Key Lookup × 100 → Sort | 約 310 | 0.21 ms | 0.21 ms |
+| 3. 複合覆蓋索引 | Index Seek（反向讀取，Ordered） | 4 | 0.04 ms | 0.04 ms |
+
+- 階段 1 的遺漏索引建議與階段 3 的索引完全相同（EQUALITY: CustomerId、INEQUALITY: StartTime、INCLUDE: ProviderId, ServiceId, EndTime, Status），預估改善 99.4%
+- `AddCustomerStartIndex` Migration 由 EF Core 自動產生：新增複合索引，並移除被取代的 `IX_Bookings_CustomerId`；在 100 萬筆上套用耗時 0.9 秒；已套用到 `BookingPerfDb` 與開發用的 `BookingDb`
+- 覆蓋索引佔 38.1 MB；同結構的單欄索引 `IX_Bookings_ServiceId` 為 13.6 MB（`IX_Bookings_CustomerId` 移除前未量測大小，以此估計多約 24 MB）
+- 套用後單元測試 26 個通過、API 與並發測試（201 × 1、409 × 99）正常
+
+**重現步驟**（`<密碼>` 換成你的 SA 密碼）
+
+1. 在 SSMS 對 `localhost,1433` 執行 `CREATE DATABASE BookingPerfDb;`
+2. 只套用第一個 Migration：
+   `dotnet ef database update InitialCreate --project src/BookingApi --connection 'Server=localhost,1433;Database=BookingPerfDb;User Id=sa;Password=<密碼>;TrustServerCertificate=True'`
+3. 在 BookingPerfDb 依序執行（SSMS 開啟「包含實際執行計畫」）：
+   - `01-seed-perf-data.sql`（產生資料）
+   - 階段 1：`03-stage1-drop-customer-index.sql` → `02-customer-bookings-query.sql`
+   - 階段 2：`04-stage2-restore-customer-index.sql` → `02-customer-bookings-query.sql`
+4. 階段 3：用第 2 步的指令，但不指定 `InitialCreate`（套用到最新的 Migration），再執行 `02-customer-bookings-query.sql`
 
 #### Day 6：Dapper 與 T-SQL
 
