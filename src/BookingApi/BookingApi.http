@@ -20,6 +20,18 @@ Content-Type: application/json
   "startTime": "2026-11-20T14:00:00"
 }
 
+### 建立預約（帶 Idempotency-Key：同一個 Key 重送會回傳第一次的結果，回應標頭有 Idempotent-Replayed: true）
+POST {{BookingApi_HostAddress}}/api/bookings
+Content-Type: application/json
+Idempotency-Key: 6f3c2a1e-0000-4000-8000-000000000001
+
+{
+  "providerId": 2,
+  "serviceId": 1,
+  "customerId": 1,
+  "startTime": "2026-11-21T10:00:00"
+}
+
 ### 查詢單筆預約
 GET {{BookingApi_HostAddress}}/api/bookings/1
 

@@ -44,6 +44,7 @@ public class ExceptionHandlingMiddleware
             NotFoundException => (StatusCodes.Status404NotFound, "Resource not found"),
             BusinessRuleException => (StatusCodes.Status400BadRequest, "Business rule violation"),
             ConflictException => (StatusCodes.Status409Conflict, "Conflict"),
+            IdempotencyKeyReusedException => (StatusCodes.Status422UnprocessableEntity, "Idempotency key reused"),
             _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred"),
         };
 

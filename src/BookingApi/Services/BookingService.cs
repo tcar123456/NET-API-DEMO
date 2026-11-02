@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using BookingApi.Domain;
 using BookingApi.Dtos;
 using BookingApi.Exceptions;
@@ -7,10 +9,16 @@ namespace BookingApi.Services;
 
 public class BookingService : IBookingService
 {
+    private const int MaxIdempotencyKeyLength = 100;
+
+    // 與 ASP.NET Core 回應 JSON 相同的設定（camelCase），回放時內容與第一次一致
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     private readonly IBookingRepository _bookingRepository;
     private readonly IProviderRepository _providerRepository;
     private readonly IServiceRepository _serviceRepository;
     private readonly ICustomerRepository _customerRepository;
+    private readonly IIdempotencyRepository _idempotencyRepository;
     private readonly TimeProvider _timeProvider;
 
     public BookingService(
@@ -18,13 +26,63 @@ public class BookingService : IBookingService
         IProviderRepository providerRepository,
         IServiceRepository serviceRepository,
         ICustomerRepository customerRepository,
+        IIdempotencyRepository idempotencyRepository,
         TimeProvider timeProvider)
     {
         _bookingRepository = bookingRepository;
         _providerRepository = providerRepository;
         _serviceRepository = serviceRepository;
         _customerRepository = customerRepository;
+        _idempotencyRepository = idempotencyRepository;
         _timeProvider = timeProvider;
+    }
+
+    public async Task<CreateBookingResult> CreateAsync(
+        CreateBookingRequest request, string? idempotencyKey, CancellationToken cancellationToken)
+    {
+        if (idempotencyKey is null)
+        {
+            return new CreateBookingResult(await CreateAsync(request, cancellationToken), IsReplay: false);
+        }
+
+        if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > MaxIdempotencyKeyLength)
+        {
+            throw new BusinessRuleException($"Idempotency-Key must be 1 to {MaxIdempotencyKeyLength} characters.");
+        }
+
+        var requestHash = ComputeRequestHash(request);
+
+        // 先嘗試寫入 Key（主鍵）：同一個 Key 的多個請求同時抵達時，只有一個能搶到並真正建立預約
+        var reserved = await _idempotencyRepository.TryReserveAsync(new IdempotencyRecord
+        {
+            Key = idempotencyKey,
+            RequestHash = requestHash,
+            CreatedAt = _timeProvider.GetTaiwanNow(),
+        }, cancellationToken);
+
+        if (!reserved)
+        {
+            return await ReplayAsync(idempotencyKey, requestHash, cancellationToken);
+        }
+
+        BookingResponse booking;
+        try
+        {
+            booking = await CreateAsync(request, cancellationToken);
+        }
+        catch
+        {
+            // 建立失敗不會留下任何資料，釋放 Key 讓用戶端可以用同一個 Key 重試。
+            // 用 CancellationToken.None：即使請求已被取消，也要完成清理
+            await _idempotencyRepository.ReleaseAsync(idempotencyKey, CancellationToken.None);
+            throw;
+        }
+
+        // 預約已經建立，結果一定要記錄下來，因此同樣不使用請求的 CancellationToken
+        await _idempotencyRepository.CompleteAsync(
+            idempotencyKey, StatusCodes.Status201Created, JsonSerializer.Serialize(booking, JsonOptions), CancellationToken.None);
+
+        return new CreateBookingResult(booking, IsReplay: false);
     }
 
     public async Task<IReadOnlyList<TimeSlotResponse>> GetAvailableSlotsAsync(
@@ -136,6 +194,38 @@ public class BookingService : IBookingService
 
         return new PagedResponse<BookingResponse>(
             items.Select(BookingResponse.FromEntity).ToList(), page, pageSize, totalCount);
+    }
+
+    private async Task<CreateBookingResult> ReplayAsync(
+        string idempotencyKey, string requestHash, CancellationToken cancellationToken)
+    {
+        // 讀取前第一個請求剛好失敗並釋放了 Key：請用戶端重試
+        var existing = await _idempotencyRepository.GetAsync(idempotencyKey, cancellationToken)
+            ?? throw new ConflictException("A request with this Idempotency-Key just failed. Please retry.");
+
+        if (existing.RequestHash != requestHash)
+        {
+            throw new IdempotencyKeyReusedException(
+                "This Idempotency-Key was already used with a different request body.");
+        }
+
+        if (existing.StatusCode is null || existing.ResponseBody is null)
+        {
+            throw new ConflictException(
+                "A request with this Idempotency-Key is still being processed. Please retry later.");
+        }
+
+        var booking = JsonSerializer.Deserialize<BookingResponse>(existing.ResponseBody, JsonOptions)
+            ?? throw new InvalidOperationException($"Stored response for Idempotency-Key '{idempotencyKey}' is empty.");
+
+        return new CreateBookingResult(booking, IsReplay: true);
+    }
+
+    // 以請求內容（而不是原始 JSON 字串）計算雜湊：空白、欄位順序不同但內容相同，視為同一個請求
+    private static string ComputeRequestHash(CreateBookingRequest request)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions);
+        return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     }
 
     // 停用的師傅視同不存在，不能被查詢時段或預約

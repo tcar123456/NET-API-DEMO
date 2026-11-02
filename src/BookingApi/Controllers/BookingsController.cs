@@ -20,12 +20,22 @@ public class BookingsController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    public async Task<IActionResult> CreateAsync(CreateBookingRequest request, CancellationToken cancellationToken)
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
+    public async Task<IActionResult> CreateAsync(
+        CreateBookingRequest request,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        CancellationToken cancellationToken)
     {
-        var booking = await _bookingService.CreateAsync(request, cancellationToken);
+        var result = await _bookingService.CreateAsync(request, idempotencyKey, cancellationToken);
+
+        if (result.IsReplay)
+        {
+            // 讓用戶端知道這是第一次請求的結果，不是新建立的預約
+            Response.Headers["Idempotent-Replayed"] = "true";
+        }
 
         // 回傳 201，並在 Location 標頭放新資源的網址 /api/bookings/{id}
-        return CreatedAtAction(nameof(GetByIdAsync), new { id = booking.Id }, booking);
+        return CreatedAtAction(nameof(GetByIdAsync), new { id = result.Booking.Id }, result.Booking);
     }
 
     [HttpGet("{id:int}")]
