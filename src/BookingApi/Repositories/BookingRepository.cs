@@ -1,5 +1,7 @@
 using BookingApi.Data;
 using BookingApi.Domain;
+using BookingApi.Exceptions;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace BookingApi.Repositories;
@@ -81,8 +83,28 @@ public class BookingRepository : IBookingRepository
         _db.Bookings.Add(booking);
     }
 
-    public Task SaveChangesAsync(CancellationToken cancellationToken)
+    public async Task SaveChangesAsync(CancellationToken cancellationToken)
     {
-        return _db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException exception)
+        {
+            // UPDATE 的 WHERE 條件帶有讀取時的 RowVersion，影響 0 筆代表讀取後已被其他請求修改
+            throw new ConflictException(
+                "The booking was modified by another request. Please reload and try again.", exception);
+        }
+        catch (DbUpdateException exception) when (IsUniqueIndexViolation(exception))
+        {
+            // 並發時多個請求都可能通過 Service 的「先查再寫」檢查，最終由唯一索引保證只有一筆成功
+            throw new ConflictException("The time slot has already been booked.", exception);
+        }
+    }
+
+    // 2601：違反唯一索引；2627：違反 UNIQUE / PRIMARY KEY 條件約束
+    private static bool IsUniqueIndexViolation(DbUpdateException exception)
+    {
+        return exception.InnerException is SqlException { Number: 2601 or 2627 };
     }
 }
