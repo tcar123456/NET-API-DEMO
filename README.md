@@ -196,7 +196,42 @@ dotnet run --project tools/ConcurrencyTester -- --base-url http://localhost:8080
 
 ## 效能調校
 
-尚未進行，規劃見 `PLAN.md` Day 5：以約 100 萬筆資料，比較「無索引 → 單欄外鍵索引 → 複合覆蓋索引」三階段的執行計畫與邏輯讀取次數。
+**情境**：查某位客戶近半年的預約，依時間由新到舊排序（`scripts/perf/02-customer-bookings-query.sql`）
+
+```sql
+SELECT Id, ProviderId, ServiceId, StartTime, EndTime, Status
+FROM dbo.Bookings
+WHERE CustomerId = @CustomerId AND StartTime >= @From AND StartTime < @To
+ORDER BY StartTime DESC;
+```
+
+**資料**：獨立的 `BookingPerfDb`，以集合式 T-SQL（`GENERATE_SERIES`）產生 **100 萬筆**預約、200 位師傅、10,000 位客戶；每位客戶 100 筆，查詢結果 34 筆
+
+**三階段比較**（SQL Server 2022；數值為 6 次執行的平均，來自 `sys.dm_exec_query_stats`）
+
+| 階段 | 可用的索引 | 執行計畫 | 邏輯讀取 | 平均耗時 | 平均 CPU |
+|---|---|---|---|---|---|
+| 1. 無索引 | 無 | Clustered Index **Scan**（平行 12 條執行緒）→ Sort | **8,484** | 8.4 ms | 62.5 ms |
+| 2. 單欄外鍵索引 | `IX_Bookings_CustomerId (CustomerId)` | Index **Seek**（100 列）→ **Key Lookup × 100** → Sort | **約 310** | 0.21 ms | 0.21 ms |
+| 3. 複合覆蓋索引 | `IX_Bookings_Customer_Start (CustomerId, StartTime) INCLUDE (ProviderId, ServiceId, EndTime, Status)` | 只有一個 Index **Seek**（反向讀取） | **4** | 0.04 ms | 0.04 ms |
+
+**怎麼解讀**
+
+- **階段 1**：沒有能用的索引，只能把 100 萬筆全部掃過一遍，再排序。SQL Server 的「遺漏索引建議」提出的正好是階段 3 的索引，預估改善 99.4%
+- **階段 2**：能直接找到這位客戶的 100 筆，但索引裡只有 `CustomerId`，其他欄位（包括用來過濾的 `StartTime`）都要回到叢集索引逐筆取得：**Key Lookup 執行了 100 次**，過濾後剩 34 筆，最後還要排序
+- **階段 3**：索引先依 `CustomerId`、再依 `StartTime` 排序，可以直接定位到「這位客戶、這段期間」的範圍；`ORDER BY StartTime DESC` 以**反向讀取**索引完成，不需要 Sort；需要的欄位都在索引裡（INCLUDE），不需要 Key Lookup
+
+**代價**
+
+- 空間：覆蓋索引 38.1 MB；同樣結構的單欄索引（`IX_Bookings_ServiceId`）為 13.6 MB，因此估計比單欄索引多約 24 MB（以 100 萬筆計）
+- 寫入：每次新增或修改預約都要多維護索引中的 INCLUDE 欄位
+- 只 INCLUDE 這個查詢真正用到的欄位；如果查詢之後加欄位、又沒有更新索引，就會再出現 Key Lookup
+
+**變更方式**：索引透過新的 Migration `AddCustomerStartIndex` 加入。新索引的第一個欄位就是 `CustomerId`，已能支援外鍵查詢，EF Core 因此在同一個 Migration 中自動移除重複的 `IX_Bookings_CustomerId`
+
+**執行計畫檔**：`docs/perf/stage1-no-index.sqlplan`、`stage2-single-column-index.sqlplan`、`stage3-covering-index.sqlplan`（實際執行計畫，可直接用 SSMS 開啟成圖形）
+
+重現步驟見 `PLAN.md` Day 5。
 
 ---
 
@@ -237,7 +272,10 @@ dotnet run --project tools/ConcurrencyTester -- --base-url http://localhost:8080
 │   └── Dockerfile
 ├── tests/BookingApi.Tests/ xUnit + NSubstitute 單元測試
 ├── tools/ConcurrencyTester/ 並發測試工具
-└── scripts/experiments/    唯一索引對照實驗的 SQL 腳本
+├── scripts/
+│   ├── experiments/        唯一索引對照實驗的 SQL 腳本
+│   └── perf/               效能調校：產生 100 萬筆資料、量測查詢、切換索引
+└── docs/perf/              三階段的實際執行計畫（.sqlplan）
 ```
 
 ## 技術
