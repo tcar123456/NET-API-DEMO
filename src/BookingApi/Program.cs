@@ -48,6 +48,15 @@ app.UseStatusCodePages();
 
 if (app.Environment.IsDevelopment())
 {
+    // 開發環境啟動時自動建立資料庫並套用 Migration，種子資料（HasData）會隨 Migration 寫入。
+    // 正式環境不這樣做：多台機器同時啟動會搶著改 schema，應在部署流程中單獨執行 Migration。
+    // AppDbContext 是 Scoped，啟動時沒有 HTTP 請求，需要自己建立一個 scope 才能取得。
+    using (var scope = app.Services.CreateScope())
+    {
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await db.Database.MigrateAsync();
+    }
+
     app.UseSwagger();
     app.UseSwaggerUI();
 }
