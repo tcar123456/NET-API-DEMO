@@ -62,9 +62,12 @@ namespace BookingApi.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("CustomerId");
-
                     b.HasIndex("ServiceId");
+
+                    b.HasIndex("CustomerId", "StartTime")
+                        .HasDatabaseName("IX_Bookings_Customer_Start");
+
+                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex("CustomerId", "StartTime"), new[] { "ProviderId", "ServiceId", "EndTime", "Status" });
 
                     b.HasIndex("ProviderId", "StartTime")
                         .IsUnique()
