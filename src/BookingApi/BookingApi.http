@@ -1,3 +1,32 @@
 @BookingApi_HostAddress = http://localhost:5120
 
+### 師傅列表
+GET {{BookingApi_HostAddress}}/api/providers
+
+### 服務列表
+GET {{BookingApi_HostAddress}}/api/services
+
+### 師傅 1 在 2026-11-20 的可預約時段
+GET {{BookingApi_HostAddress}}/api/providers/1/available-slots?date=2026-11-20
+
+### 建立預約（時間為台灣時間，不帶時區）
+POST {{BookingApi_HostAddress}}/api/bookings
+Content-Type: application/json
+
+{
+  "providerId": 1,
+  "serviceId": 2,
+  "customerId": 3,
+  "startTime": "2026-11-20T14:00:00"
+}
+
+### 查詢單筆預約
+GET {{BookingApi_HostAddress}}/api/bookings/1
+
+### 取消預約
+POST {{BookingApi_HostAddress}}/api/bookings/1/cancel
+
+### 客戶預約紀錄（分頁）
+GET {{BookingApi_HostAddress}}/api/customers/3/bookings?page=1&pageSize=20
+
 ###
