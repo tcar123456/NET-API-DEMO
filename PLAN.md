@@ -283,19 +283,30 @@ dotnet new gitignore
 
 ---
 
-### Day 4：Docker Compose、README 與收尾
+### Day 4：Docker Compose、README 與收尾 ✅ 2026-11-02 完成
 
 **任務**
-- [ ] 為 API 寫 Dockerfile
-- [ ] 寫 `docker-compose.yml`：API + SQL Server，SA 密碼從 `.env` 讀取
-- [ ] 提供 `.env.example`，確認 `.env` 已被 `.gitignore` 排除
-- [ ] API 啟動時自動套用 Migration 與 Seed（僅限開發環境）
-- [ ] 從零開始 `docker compose up`，確認別人照 README 就能跑起來
-- [ ] 撰寫 README（內容見第七節）
+- [x] 為 API 寫 Dockerfile（多階段建置；執行時使用 .NET 映像檔內建的非 root 使用者 `app`）
+- [x] 寫 `docker-compose.yml`：API + SQL Server，SA 密碼從 `.env` 讀取
+- [x] 提供 `.env.example`，確認 `.env` 已被 `.gitignore` 排除
+- [x] API 啟動時自動套用 Migration 與 Seed（僅限開發環境）
+- [x] 從零開始 `docker compose up`，確認別人照 README 就能跑起來
+- [x] 撰寫 README（內容見第七節；效能調校一節標註為尚未進行）
 
 **學習重點**：容器化、環境變數與機密管理
 
 **完成標準**：在一台乾淨的環境 clone 下來，照 README 5 分鐘內可以跑起來並打到 API。
+
+**實作決定**
+- Compose 的 SQL Server 對主機開 `14330`，與本機開發用的 `booking-sql`（1433）分開，兩者互不影響
+- SQL Server 加上健康檢查，API 以 `depends_on: condition: service_healthy` 等資料庫可連線後才啟動
+- Compose 中 API 以 `Development` 執行，因此會自動套用 Migration 並開啟 Swagger UI
+- `.env.example` 的密碼留空，未設定時 Compose 直接報錯並提示，避免使用範例密碼
+- 資料庫資料放在具名 volume `sqlserver-data`：`docker compose down` 保留資料，`down -v` 才刪除
+- `.dockerignore` 排除 `bin/`、`obj/`、`.env`、測試與工具專案，`global.json` 也不會被複製進建置映像檔
+
+**驗證紀錄**：把 Git 會追蹤的檔案（不含 `bin/`、`obj/`、`.env`）複製到暫存資料夾模擬乾淨的 clone，依 `.env.example` 建立 `.env` 後執行 `docker compose up -d --build`：50 秒內完成建置與啟動；API 日誌顯示自動套用 `InitialCreate`；師傅列表、Swagger UI、可預約時段皆正常；容器以 `app` 使用者執行；對容器版本跑並發測試，建立 201 × 1、409 × 99，取消 200 × 1、409 × 99；重啟 API 後資料仍在。測試後以 `down -v --rmi local` 清除。
+限制：驗證是在同一台開發機上模擬，基底映像檔可能已有快取，沒有在另一台全新的電腦上測試。
 
 ---
 
