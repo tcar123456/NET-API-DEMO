@@ -116,7 +116,11 @@ BookingApi/                         ← Git 根目錄，CLAUDE.md 放這裡
 | 名稱 | 內容 | 目的 |
 |---|---|---|
 | UX_Bookings_Provider_Start_Active | UNIQUE (ProviderId, StartTime) WHERE Status = 1 | **防止重複預約的核心** |
-| IX_Bookings_Customer_Start | (CustomerId, StartTime) | 查客戶預約紀錄；第 5 天效能調校時才加，先做「調校前」的對照 |
+| IX_Bookings_CustomerId | (CustomerId) | EF Core 依慣例為外鍵自動建立（Day 1 Migration 已產生）；第 5 天作為「單欄索引」階段的對照 |
+| IX_Bookings_ServiceId | (ServiceId) | EF Core 依慣例為外鍵自動建立 |
+| IX_Bookings_Customer_Start | (CustomerId, StartTime) INCLUDE (...) | 查客戶預約紀錄；第 5 天效能調校時才加 |
+
+> ProviderId 沒有單獨的外鍵索引：EF Core 判斷 `UX_Bookings_Provider_Start_Active` 的第一個欄位已是 ProviderId，因此不另外建立。
 
 ### IdempotencyRecords（加分版才建立）
 
@@ -192,21 +196,25 @@ dotnet new gitignore
 
 ---
 
-### Day 1：Domain、資料庫與 Migration
+### Day 1：Domain、資料庫與 Migration ✅ 2026-11-02 完成
 
 **任務**
-- [ ] 刪掉範本內建的 WeatherForecast
-- [ ] 建立 Entity：Provider、Service、Customer、Booking，以及 BookingStatus enum
-- [ ] 建立 `AppDbContext`，用 Fluent API 設定欄位長度、型別、外鍵
-- [ ] 設定唯一篩選索引 `UX_Bookings_Provider_Start_Active`
-- [ ] 設定 RowVersion
-- [ ] 連線字串放在 User Secrets（`dotnet user-secrets`），不寫進 appsettings.json
-- [ ] 建立第一個 Migration 並套用
-- [ ] 寫 Seed：3 位師傅、3 個服務、5 位客戶
+- [x] 刪掉範本內建的 WeatherForecast
+- [x] 建立 Entity：Provider、Service、Customer、Booking，以及 BookingStatus enum
+- [x] 建立 `AppDbContext`，用 Fluent API 設定欄位長度、型別、外鍵（每個 Entity 一個 `IEntityTypeConfiguration`，外鍵一律 `Restrict`）
+- [x] 設定唯一篩選索引 `UX_Bookings_Provider_Start_Active`
+- [x] 設定 RowVersion
+- [x] 連線字串放在 User Secrets（`dotnet user-secrets`，鍵名 `ConnectionStrings:BookingDb`），不寫進 appsettings.json
+- [x] 建立第一個 Migration 並套用（`InitialCreate`）
+- [x] 寫 Seed：3 位師傅、3 個服務、5 位客戶（用 `HasData`，種子資料隨 Migration 寫入）
 
 **學習重點**：class 與 record、enum、nullable reference types、EF Core 的 Fluent API、Migration 運作方式
 
 **完成標準**：SSMS 中看得到 4 張表與唯一索引，且索引有 `WHERE [Status] = 1` 條件。
+
+**驗證紀錄**：4 張表與種子資料筆數正確；索引的 filter 為 `([Status]=(1))`；在交易中測試（測完 ROLLBACK）：同時段第二筆 Active 被擋下（錯誤 2601），取消後同時段可再預約。
+另外發現：用 `sqlcmd` 手動寫入有篩選索引的表時，必須加 `-I`（`QUOTED_IDENTIFIER ON`），否則會出現錯誤 1934；EF Core 與 SSMS 預設就是 ON，不受影響。
+
 ---
 
 ### Day 2：分層、API 與錯誤處理
@@ -224,6 +232,7 @@ dotnet new gitignore
 **學習重點**：介面、依賴注入與三種生命週期、async/await、例外處理、HTTP 狀態碼
 
 **完成標準**：可以用 Swagger UI 走完「查時段 → 建立預約 → 查詢 → 取消」的完整流程；錯誤回應格式一致。
+
 ---
 
 ### Day 3：並發控制與測試（本專案最重要的一天）
@@ -239,6 +248,7 @@ dotnet new gitignore
 **學習重點**：為什麼「先查再寫」在並發下不安全、唯一約束、悲觀鎖與樂觀鎖的差異、單元測試與模擬
 
 **完成標準**：並發測試穩定只有 1 筆成功；實驗對照有記錄；單元測試全部通過。
+
 ---
 
 ### Day 4：Docker Compose、README 與收尾
@@ -263,12 +273,14 @@ dotnet new gitignore
 
 - [ ] 在 `scripts/perf/` 寫 T-SQL 腳本，以集合式寫法（不用迴圈逐筆）塞入約 100 萬筆預約
   - 注意：要避開唯一索引衝突，例如用較多的師傅數量分散時段，或讓大部分歷史資料狀態為 Cancelled
-- [ ] 針對「查某客戶近半年預約、依時間排序」的查詢：
-  - 開啟 `SET STATISTICS IO, TIME ON` 與「包含實際執行計畫」
-  - 記錄調校前的邏輯讀取次數、耗時、執行計畫（預期看到 Scan）
-  - 加上 `IX_Bookings_Customer_Start`，視需要加 `INCLUDE` 欄位
-  - 記錄調校後的數據與執行計畫（預期看到 Seek）
-- [ ] 把前後比較與截圖寫進 README
+- [ ] 針對「查某客戶近半年預約、依時間排序」的查詢，做三階段比較。每個階段都開啟 `SET STATISTICS IO, TIME ON` 與「包含實際執行計畫」，記錄邏輯讀取次數、耗時、執行計畫截圖：
+  1. **無索引**：在實驗腳本中暫時 `DROP INDEX IX_Bookings_CustomerId`（預期看到 Scan）
+  2. **單欄外鍵索引**：重建 `IX_Bookings_CustomerId`，恢復 Migration 的原狀（預期看到 Seek + Key Lookup + Sort）
+  3. **複合覆蓋索引**：加上 `IX_Bookings_Customer_Start (CustomerId, StartTime) INCLUDE (...)`（預期只有 Seek，沒有 Key Lookup 與 Sort）
+  - 預期結果為推測，實際執行計畫取決於資料量與分布，以實測為準
+  - 階段 1 只在實驗用的 T-SQL 腳本中進行，結束後必須確認 `IX_Bookings_CustomerId` 已恢復；正式 schema 的變更（加入 `IX_Bookings_Customer_Start`）要透過新的 Migration
+- [ ] 把三階段比較與截圖寫進 README，說明 Key Lookup 與覆蓋索引的差異
+
 #### Day 6：Dapper 與 T-SQL
 
 - [ ] 新增一支報表 API，例如「某月各師傅的預約數與營收」
@@ -281,10 +293,12 @@ dotnet new gitignore
 - [ ] 同一個 Key 重送：回傳第一次的結果，不重複建立
 - [ ] 同一個 Key 但請求內容不同：回傳 422 或 409
 - [ ] 寫測試驗證
+
 #### Day 8：CI 與快取
 
 - [ ] GitHub Actions：push 與 PR 時自動 `dotnet build` 與 `dotnet test`
 - [ ] Redis 快取「可預約時段」查詢；建立或取消預約後刪除對應快取
+
 ---
 
 ## 七、README 必備內容
