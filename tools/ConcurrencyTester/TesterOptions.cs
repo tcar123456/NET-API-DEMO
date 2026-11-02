@@ -23,6 +23,6 @@ public record TesterOptions(string Scenario, int Requests, string BaseUrl, int P
     }
 }
 
-public record RequestResult(int StatusCode, string? Detail);
+public record RequestResult(int StatusCode, string? Detail, int? BookingId);
 
 public record SlotDto(DateTime StartTime, DateTime EndTime);

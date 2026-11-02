@@ -6,6 +6,8 @@ using ConcurrencyTester;
 // 用法：
 //   dotnet run --project tools/ConcurrencyTester                       同時送出 100 個搶同一時段的建立預約請求
 //   dotnet run --project tools/ConcurrencyTester -- --scenario cancel  同時送出 100 個取消同一筆預約的請求
+//   dotnet run --project tools/ConcurrencyTester -- --scenario idempotency
+//                                                                      同時送出 100 個帶同一個 Idempotency-Key 的相同請求
 //   其他參數：--requests 100  --base-url http://localhost:5120  --provider 1
 
 var options = TesterOptions.Parse(args);
@@ -20,10 +22,22 @@ var results = options.Scenario switch
 {
     "create" => await RunCreateScenarioAsync(client, options, slot),
     "cancel" => await RunCancelScenarioAsync(client, options, slot),
-    _ => throw new ArgumentException($"Unknown scenario '{options.Scenario}'. Use 'create' or 'cancel'."),
+    "idempotency" => await RunIdempotencyScenarioAsync(client, options, slot),
+    _ => throw new ArgumentException($"Unknown scenario '{options.Scenario}'. Use 'create', 'cancel' or 'idempotency'."),
 };
 
 PrintSummary(results);
+
+if (options.Scenario == "idempotency")
+{
+    // 預期：只建立一筆預約；所有 201 都是同一筆（第一次或回放），其餘是「處理中」的 409
+    var createdIds = results.Where(r => r.StatusCode == 201).Select(r => r.BookingId).Distinct().ToList();
+    var idempotentPassed = createdIds.Count == 1 && results.All(r => r.StatusCode is 201 or 409);
+    Console.WriteLine(idempotentPassed
+        ? $"RESULT: PASS (only booking {createdIds[0]} was created)"
+        : $"RESULT: FAIL (distinct booking ids: {string.Join(", ", createdIds)})");
+    return idempotentPassed ? 0 : 1;
+}
 
 // 預期：剛好 1 個請求成功，其餘都是 409
 var successCount = results.Count(r => r.StatusCode is 200 or 201);
@@ -31,6 +45,29 @@ var conflictCount = results.Count(r => r.StatusCode == 409);
 var passed = successCount == 1 && conflictCount == options.Requests - 1;
 Console.WriteLine(passed ? "RESULT: PASS (exactly 1 success)" : "RESULT: FAIL");
 return passed ? 0 : 1;
+
+static async Task<List<RequestResult>> RunIdempotencyScenarioAsync(HttpClient client, TesterOptions options, DateTime slot)
+{
+    // 模擬用戶端對同一個操作重送多次：內容完全相同，帶同一個 Idempotency-Key
+    var idempotencyKey = Guid.NewGuid().ToString();
+    Console.WriteLine($"Idempotency-Key: {idempotencyKey}");
+
+    return await SendConcurrentlyAsync(options.Requests, _ =>
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/bookings")
+        {
+            Content = JsonContent.Create(new
+            {
+                providerId = options.ProviderId,
+                serviceId = 1,
+                customerId = 1,
+                startTime = slot.ToString("yyyy-MM-ddTHH:mm:ss"),
+            }),
+        };
+        request.Headers.Add("Idempotency-Key", idempotencyKey);
+        return client.SendAsync(request);
+    });
+}
 
 static async Task<List<RequestResult>> RunCreateScenarioAsync(HttpClient client, TesterOptions options, DateTime slot)
 {
@@ -69,7 +106,9 @@ static async Task<List<RequestResult>> SendConcurrentlyAsync(int count, Func<int
     {
         await gate.Task;
         using var response = await send(i);
-        return new RequestResult((int)response.StatusCode, await ReadDetailAsync(response));
+        var bookingId = await ReadBookingIdAsync(response);
+        var detail = response.Headers.Contains("Idempotent-Replayed") ? "(replayed)" : await ReadDetailAsync(response);
+        return new RequestResult((int)response.StatusCode, detail, bookingId);
     }).ToList();
 
     var stopwatch = Stopwatch.StartNew();
@@ -79,6 +118,17 @@ static async Task<List<RequestResult>> SendConcurrentlyAsync(int count, Func<int
 
     Console.WriteLine($"Elapsed: {stopwatch.ElapsedMilliseconds} ms");
     return results.ToList();
+}
+
+static async Task<int?> ReadBookingIdAsync(HttpResponseMessage response)
+{
+    if (!response.IsSuccessStatusCode)
+    {
+        return null;
+    }
+
+    var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+    return body.TryGetProperty("id", out var id) ? id.GetInt32() : null;
 }
 
 static async Task<string?> ReadDetailAsync(HttpResponseMessage response)
