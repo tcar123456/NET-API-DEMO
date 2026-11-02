@@ -116,7 +116,7 @@ BookingApi/                         ← Git 根目錄，CLAUDE.md 放這裡
 | 名稱 | 內容 | 目的 |
 |---|---|---|
 | UX_Bookings_Provider_Start_Active | UNIQUE (ProviderId, StartTime) WHERE Status = 1 | **防止重複預約的核心** |
-| IX_Bookings_Customer_Start | (CustomerId, StartTime) | 查客戶預約紀錄；第 6 天效能調校時才加，先做「調校前」的對照 |
+| IX_Bookings_Customer_Start | (CustomerId, StartTime) | 查客戶預約紀錄；第 5 天效能調校時才加，先做「調校前」的對照 |
 
 ### IdempotencyRecords（加分版才建立）
 
@@ -164,16 +164,17 @@ BookingApi/                         ← Git 根目錄，CLAUDE.md 放這裡
 ## 六、每日進度
 
 > 每天結束前：commit、push，並用自己的話寫下當天學到的 3 個 C# 概念（寫在 `notes/` 或 commit 說明都可以）。
-> 「面試對應」欄位指的是面試準備清單中的題號。
 
-### Day 0：環境建置（約半天）
+### Day 0：環境建置（約半天）✅ 2026-11-02 完成
 
 **任務**
-- [ ] 安裝 .NET 8 SDK、Docker Desktop、SSMS，確認 `dotnet --list-sdks` 有 8.0.x
-- [ ] 安裝 `dotnet-ef` 全域工具（指定 8.x：`dotnet tool install --global dotnet-ef --version 8.*`）
-- [ ] 用 CLI 建立方案與專案（指令見下方）
-- [ ] `git init`、建立 `.gitignore`（`dotnet new gitignore`）、推上 GitHub
-- [ ] 用 Docker 跑起 SQL Server，用 SSMS 連得進去
+- [x] 安裝 .NET 8 SDK、Docker Desktop，確認 `dotnet --list-sdks` 有 8.0.x（8.0.422）
+- [x] 安裝 SSMS（SSMS 22.11.3，透過 `winget install Microsoft.SQLServerManagementStudio.22`）
+- [x] 用 `global.json` 鎖定 SDK 版本為 8.0.422
+- [x] 安裝 `dotnet-ef` 全域工具（指定 8.x：`dotnet tool install --global dotnet-ef --version 8.*`，已裝 8.0.33）
+- [x] 用 CLI 建立方案與專案（指令見下方）
+- [x] `git init`、建立 `.gitignore`（`dotnet new gitignore`）、推上 GitHub（https://github.com/tcar123456/NET-API-DEMO）
+- [x] 用 Docker 跑起 SQL Server，用 SSMS 連得進去（容器名稱 `booking-sql`，SQL Server 2022 CU27，`localhost,1433`）
 
 **建立專案指令**（在 Git 根目錄執行）
 
@@ -206,9 +207,6 @@ dotnet new gitignore
 **學習重點**：class 與 record、enum、nullable reference types、EF Core 的 Fluent API、Migration 運作方式
 
 **完成標準**：SSMS 中看得到 4 張表與唯一索引，且索引有 `WHERE [Status] = 1` 條件。
-
-**面試對應**：10（索引）、17（OOP）
-
 ---
 
 ### Day 2：分層、API 與錯誤處理
@@ -220,15 +218,12 @@ dotnet new gitignore
 - [ ] 建立 Controller，完成第五節的所有 API（取消與並發處理可先留簡單版本）
 - [ ] 在 `Program.cs` 用 DI 註冊 Service 與 Repository，並理解為什麼用 Scoped
 - [ ] 建立自訂例外（NotFound、BusinessRule、Conflict）與全域錯誤處理 Middleware，統一回傳 ProblemDetails
-- [ ] 加上 Scalar UI
+- [ ] 確認 Swagger UI 能顯示所有 API（範本內建，不另加套件）
 - [ ] 所有資料庫操作都用 async，並傳遞 CancellationToken
 
 **學習重點**：介面、依賴注入與三種生命週期、async/await、例外處理、HTTP 狀態碼
 
-**完成標準**：可以用 Scalar UI 走完「查時段 → 建立預約 → 查詢 → 取消」的完整流程；錯誤回應格式一致。
-
-**面試對應**：16（API 設計）、18（介面）、19（async）、20（DI）
-
+**完成標準**：可以用 Swagger UI 走完「查時段 → 建立預約 → 查詢 → 取消」的完整流程；錯誤回應格式一致。
 ---
 
 ### Day 3：並發控制與測試（本專案最重要的一天）
@@ -244,9 +239,6 @@ dotnet new gitignore
 **學習重點**：為什麼「先查再寫」在並發下不安全、唯一約束、悲觀鎖與樂觀鎖的差異、單元測試與模擬
 
 **完成標準**：並發測試穩定只有 1 筆成功；實驗對照有記錄；單元測試全部通過。
-
-**面試對應**：7（搶時段）、12（交易）
-
 ---
 
 ### Day 4：Docker Compose、README 與收尾
@@ -277,9 +269,6 @@ dotnet new gitignore
   - 加上 `IX_Bookings_Customer_Start`，視需要加 `INCLUDE` 欄位
   - 記錄調校後的數據與執行計畫（預期看到 Seek）
 - [ ] 把前後比較與截圖寫進 README
-
-**面試對應**：10（索引）、11（API 變慢怎麼查）
-
 #### Day 6：Dapper 與 T-SQL
 
 - [ ] 新增一支報表 API，例如「某月各師傅的預約數與營收」
@@ -292,16 +281,10 @@ dotnet new gitignore
 - [ ] 同一個 Key 重送：回傳第一次的結果，不重複建立
 - [ ] 同一個 Key 但請求內容不同：回傳 422 或 409
 - [ ] 寫測試驗證
-
-**面試對應**：6（LINE Webhook 重送）、14（訊息佇列）
-
 #### Day 8：CI 與快取
 
 - [ ] GitHub Actions：push 與 PR 時自動 `dotnet build` 與 `dotnet test`
 - [ ] Redis 快取「可預約時段」查詢；建立或取消預約後刪除對應快取
-
-**面試對應**：13（快取）、21（流程）
-
 ---
 
 ## 七、README 必備內容

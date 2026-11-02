@@ -15,7 +15,7 @@
 | ORM | Entity Framework Core | MS SQL 開發經驗 |
 | 輕量查詢 | Dapper（加分項） | T-SQL |
 | 資料庫 | SQL Server 2022 Developer（Docker） | MS SQL、schema 設計、效能調校 |
-| API 文件 | Swashbuckle 產生 OpenAPI（.NET 8 範本內建）；UI 用 Swagger UI 或 Scalar（待決定） | — |
+| API 文件 | Swashbuckle 產生 OpenAPI + Swagger UI（.NET 8 範本內建） | — |
 | 測試 | xUnit + NSubstitute | — |
 | 容器 | Docker / Docker Compose | Docker（加分條件） |
 | CI | GitHub Actions（加分項） | CI/CD |
@@ -37,6 +37,11 @@
 
 - 企業既有系統（特別是從 .NET Framework 升級上來的）大多是 Controller 架構。
 - Controller 較能展示 OOP、分層與依賴注入。
+
+### Swagger UI，而不是 Scalar
+
+- .NET 8 的 webapi 範本已內建 Swashbuckle 與 Swagger UI，不需要另外加套件。
+- .NET 5 到 .NET 8 的 webapi 範本都預設使用 Swashbuckle，既有系統中很常見。
 
 ### Entity Framework Core + Dapper 並用
 
@@ -72,7 +77,6 @@
 | Microsoft.EntityFrameworkCore.SqlServer | EF Core 連 SQL Server | 基本版 |
 | Microsoft.EntityFrameworkCore.Design | Migration 設計時工具 | 基本版 |
 | Swashbuckle.AspNetCore | 產生 OpenAPI 文件與 Swagger UI（.NET 8 範本內建） | 基本版 |
-| Scalar.AspNetCore | API 文件 UI（是否取代 Swagger UI 待決定） | 基本版 |
 | Dapper | 輕量查詢 | 加分版 |
 | Microsoft.Data.SqlClient | Dapper 連線用 | 加分版 |
 | StackExchange.Redis | Redis 快取 | 加分版 |
@@ -104,7 +108,7 @@
 | .NET SDK | .NET 8 SDK（用 `dotnet --list-sdks` 確認有 8.0.x） |
 | 資料庫工具 | SQL Server Management Studio（SSMS），用來看執行計畫 |
 | 容器 | Docker Desktop（需啟用 WSL 2） |
-| API 測試 | Scalar UI、或 VS 內建的 `.http` 檔 |
+| API 測試 | Swagger UI、或 VS 內建的 `.http` 檔 |
 
 ---
 
